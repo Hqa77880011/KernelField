@@ -80,3 +80,7 @@ python -m kernelfield.evaluate_images --predictions runs/full/evaluation/predict
 ```
 
 LPIPS uses the [published perceptual metric implementation](https://github.com/richzhang/PerceptualSimilarity) with RGB values mapped to [-1,1]. Saliency endpoints use [PySODMetrics](https://github.com/lartpang/PySODMetrics) for adaptive/maximum F-measure, E-measure, S-measure, and weighted F-measure; their threshold conventions remain those of the metric package.
+
+## Reproduction logic conventions
+
+The spatial Jacobian is differentiated from a two-channel coordinate potential, so its discrete mixed derivatives commute. Image/proximal steps alternate with reblur-data-term trajectory/potential updates; field_step defaults to 0.01. Bilinear border interpolation is implemented with gather/weights to support the higher derivatives required by training the unrolled adjoint. The changed two-channel potential head requires retraining checkpoints created with the previous four-channel unconstrained Jacobian head.

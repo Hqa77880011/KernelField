@@ -11,7 +11,7 @@ class Model(nn.Module):
         w, t = c.get('width',32), c.get('samples',5)
         self.encoder = Encoder(3,w)
         self.trajectory = nn.Linear(w,2*t)
-        self.jacobian = nn.Conv2d(w,4,1)
+        self.jacobian = nn.Conv2d(w,2,1)
         self.free = nn.Conv2d(w,2*t,1)
         self.uncertainty = nn.Conv2d(w,1,1)
         self.proximal = nn.Sequential(nn.Conv2d(6,w,3,padding=1),nn.SiLU(),nn.Conv2d(w,3,3,padding=1))
@@ -23,9 +23,14 @@ class Model(nn.Module):
         t = self.c.get('samples',5)
         trajectory = self.trajectory(h.mean((2,3))).reshape(n,t,2)
         trajectory = trajectory - trajectory.mean(1,keepdim=True)
-        matrix = .1*self.jacobian(h).reshape(n,2,2,height,width)
-        eye = torch.eye(2,device=h.device)[None,:,:,None,None]
-        flow = torch.einsum('nijhw,ntj->ntihw',matrix+eye,trajectory)
+        potential = .1*self.jacobian(h)
+        def exposure_field(path, spatial_potential):
+            dy, dx = torch.gradient(spatial_potential, dim=(-2,-1))
+            matrix = torch.stack([dx,dy],2)
+            eye = torch.eye(2,device=h.device,dtype=h.dtype)[None,:,:,None,None]
+            flow = torch.einsum('nijhw,ntj->ntihw',matrix+eye,path)
+            return flow, matrix
+        flow, matrix = exposure_field(trajectory, potential)
         if self.c['variant']=='no_integrability':
             flow = self.free(h).reshape(n,t,2,height,width)
         gate = torch.exp(-F.softplus(self.uncertainty(h)))
@@ -39,6 +44,17 @@ class Model(nn.Module):
                 gradient = torch.autograd.grad((reblur-observed).square().sum()/2,latent,create_graph=self.training,retain_graph=True)[0]
                 latent = latent-self.c.get('step',.1)*gate*gradient
                 latent = latent+.1*self.proximal(torch.cat([latent,observed],1))
+                data_term = (torch.stack([warp(latent,flow[:,i]) for i in range(t)]).mean(0)-observed).square().sum()/2
+                field_step = self.c.get('field_step',.01)
+                if self.c['variant']=='no_integrability':
+                    correction = torch.autograd.grad(data_term,flow,create_graph=self.training,retain_graph=True)[0]
+                    flow = flow-field_step*correction
+                else:
+                    path_gradient, potential_gradient = torch.autograd.grad(data_term,(trajectory,potential),create_graph=self.training,retain_graph=True)
+                    trajectory = trajectory-field_step*path_gradient
+                    trajectory = trajectory-trajectory.mean(1,keepdim=True)
+                    potential = potential-field_step*potential_gradient
+                    flow, matrix = exposure_field(trajectory,potential)
         reblur = torch.stack([warp(latent,flow[:,i]) for i in range(t)]).mean(0)
         return {'prediction':latent,'reblur':reblur,'flow':flow,'uncertainty':1-gate,'jacobian':matrix.flatten(1,2)}
 

@@ -30,12 +30,21 @@ def boundary(y, radius=3):
 
 
 def warp(x, flow):
-    n, _, h, w = x.shape
-    yy, xx = torch.meshgrid(torch.linspace(-1, 1, h, device=x.device),
-                            torch.linspace(-1, 1, w, device=x.device), indexing="ij")
-    grid = torch.stack([xx, yy], -1)[None].expand(n, -1, -1, -1)
-    displacement = torch.stack([flow[:, 0] * 2 / max(w-1, 1), flow[:, 1] * 2 / max(h-1, 1)], -1)
-    return F.grid_sample(x, grid + displacement, mode="bilinear", padding_mode="border", align_corners=True)
+    """Bilinear border warp supporting the unrolled image-step derivatives."""
+    n, channels, height, width = x.shape
+    yy, xx = torch.meshgrid(torch.arange(height, device=x.device, dtype=x.dtype),
+                            torch.arange(width, device=x.device, dtype=x.dtype), indexing="ij")
+    sx = (xx[None] + flow[:, 0]).clamp(0, width - 1)
+    sy = (yy[None] + flow[:, 1]).clamp(0, height - 1)
+    x0, y0 = sx.floor().long(), sy.floor().long()
+    x1, y1 = (x0 + 1).clamp_max(width - 1), (y0 + 1).clamp_max(height - 1)
+    wx, wy = sx - x0, sy - y0
+    def sample(ix, iy):
+        index = (iy * width + ix).flatten(1)[:, None].expand(-1, channels, -1)
+        return x.flatten(2).gather(2, index).reshape(n, channels, height, width)
+    top = (1 - wx[:, None]) * sample(x0, y0) + wx[:, None] * sample(x1, y0)
+    bottom = (1 - wx[:, None]) * sample(x0, y1) + wx[:, None] * sample(x1, y1)
+    return (1 - wy[:, None]) * top + wy[:, None] * bottom
 
 
 def image_demo(seed, n, channels=3, mask=True):
